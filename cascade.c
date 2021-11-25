@@ -116,7 +116,7 @@ void download_only_peer(char* cascade_file)
         }
     }
 
-    printf("Missing blocks: %d/%lud\n", uncomp_count, casc_file->blockcount);
+    printf("Missing blocks: %d/%lu\n", uncomp_count, casc_file->blockcount);
     if (uncomp_count == 0)
     {
         printf("All blocks are already present, skipping external connections.\n");
@@ -523,6 +523,74 @@ int get_peers_list(hashdata_t hash)
     return peercount;
 }
 
+int subscribe(hashdata_t hash)
+{
+    rio_t rio;
+    char msg_buf[MAXLINE];
+
+    int tracker_socket = Open_clientfd(tracker_ip, tracker_port);
+    Rio_readinitb(&rio, tracker_socket);
+
+    struct RequestHeader request_header;
+    // memcpy as it does not end with terminating null byte.
+    memcpy(request_header.protocol, "CASC", sizeof(request_header.protocol));
+
+    request_header.version = htonl(1);
+    request_header.command = htonl(2);
+    request_header.length = htonl(BODY_SIZE);
+
+    memcpy(msg_buf, &request_header, HEADER_SIZE);
+
+    struct in_addr byte_my_ip;
+    inet_aton(my_ip, &byte_my_ip);
+
+    struct RequestBody request_body;
+    memcpy(request_body.hash, hash, SHA256_HASH_SIZE);
+    request_body.ip = byte_my_ip;
+    request_body.port = htons(atoi(my_port));
+    memcpy(msg_buf + HEADER_SIZE, &request_body, BODY_SIZE);
+
+    Rio_writen(tracker_socket, msg_buf, MESSAGE_SIZE);
+
+    Rio_readnb(&rio, msg_buf, MAXLINE);
+
+    char reply_header[REPLY_HEADER_SIZE];
+    memcpy(reply_header, msg_buf, REPLY_HEADER_SIZE);
+
+    uint32_t msglen = ntohl(*(uint32_t*)&reply_header[1]);
+    if (msglen == 0)
+    {
+        return 0;
+    }
+
+    if (reply_header[0] != 0)
+    {
+        char* error_buf = Malloc(msglen + 1);
+        if (error_buf == NULL)
+        {
+            printf("Tracker error %d and out-of-memory reading error\n", reply_header[0]);
+            Close(tracker_socket);
+            return 0;
+        }
+        memset(error_buf, 0, msglen + 1);
+        memcpy(reply_header, error_buf, msglen);
+        printf("Tracker gave error: %d - %s\n", reply_header[0], error_buf);
+        Free(error_buf);
+        Close(tracker_socket);
+        return 0;
+    }
+
+    if (msglen % 12 != 0)
+    {
+        printf("LIST response from tracker was length %ud but should be evenly divisible by 12\n", msglen);
+        Close(tracker_socket);
+        return 0;
+    }
+    
+    Close(tracker_socket);
+    return 1;
+}
+
 /*
  * The entry point for the code. Parses command line arguments and starts up the appropriate peer code.
  */
@@ -584,8 +652,18 @@ int main(int argc, char **argv)
         }
     }
 
+
+    // TODO: Create server (Thread)
+
+
     for (int j=0; j<casc_count; j++)
     {
+
+        hashdata_t hash_buf;
+        get_file_sha(cascade_files[j], hash_buf, SHA256_HASH_SIZE);
+
+        subscribe(hash_buf);
+
         download_only_peer(cascade_files[j]);
     }
 
