@@ -14,6 +14,8 @@
 #include "./cascade.h"
 #include "./sha256.h"
 
+#include <err.h>
+
 char tracker_ip[IP_LEN];
 char tracker_port[PORT_LEN];
 char my_ip[IP_LEN];
@@ -591,6 +593,66 @@ int subscribe(hashdata_t hash)
     return 1;
 }
 
+void* handle(void *arg) {
+    printf("Handling called");
+}
+
+void* server(void *arg) {
+    // open listening socket (rio)
+
+    //infinite loop
+
+    //complete action (rio)
+
+    //close connection (rio)
+
+    // Descriptors
+    int listenfd;
+    int connfd;
+    // Client Info
+    char hostname[MAXLINE];
+    char port[MAXLINE];
+    // Client Address
+    socklen_t clientlen;
+    struct sockaddr clientaddr;
+
+    listenfd = open_listenfd(my_port);
+
+    pthread_t *threads = calloc(300, sizeof(pthread_t));
+    int indx = 0;
+
+    while(1) {
+        clientlen = sizeof(clientaddr);
+        printf("Waiting for connections...\n");
+        connfd = Accept(listenfd, &clientaddr, &clientlen); // Waits for connection to happen
+        
+        // mayby not needed
+        getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+        printf("Accepted connection from (%s, %s)\n", hostname, port);
+
+        
+        // threads
+        if (pthread_create(&threads[indx], NULL, &handle, &connfd) != 0) {
+            err(1, "pthread_create() failed");
+        }
+        printf("Created Thread\n");
+        indx++;
+        
+        
+
+
+    }
+
+    for (int i = 0; i < indx; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            err(1, "pthread_join() failed");
+        }
+    }
+
+    return 0;
+    
+}
+
 /*
  * The entry point for the code. Parses command line arguments and starts up the appropriate peer code.
  */
@@ -652,10 +714,13 @@ int main(int argc, char **argv)
         }
     }
 
+    // Create server thread
+    pthread_t server_thread;
+    if (pthread_create(&server_thread, NULL, &server, NULL) != 0) {
+      err(1, "pthread_create() failed");
+    }
 
-    // TODO: Create server (Thread)
-
-
+    // Download files
     for (int j=0; j<casc_count; j++)
     {
 
@@ -664,7 +729,14 @@ int main(int argc, char **argv)
 
         subscribe(hash_buf);
 
+        printf("[ Getting file %i ]\n", j);
         download_only_peer(cascade_files[j]);
+    }
+
+    
+    // Wait for server to stop
+    if (pthread_join(server_thread, NULL) != 0) {
+      err(1, "pthread_join() failed");
     }
 
     exit(EXIT_SUCCESS);
