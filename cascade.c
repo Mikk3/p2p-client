@@ -594,18 +594,33 @@ int subscribe(hashdata_t hash)
 }
 
 void* handle(void *arg) {
-    printf("Handling called");
+    printf("handle called\n");
+
+    rio_t rio;
+    char msg_buf[MAXLINE];
+
+    int connfd = *(int*)arg;
+
+    Rio_readinitb(&rio, connfd);
+
+    // Read request
+    Rio_readnb(&rio, msg_buf, PEER_REQUEST_HEADER_SIZE);
+
+    uint64_t RequestedBlock;
+    char RequestedCascadeHash[32];
+
+    RequestedBlock = be64toh(*((unsigned long long*)&msg_buf[24]));
+    memcpy(RequestedCascadeHash, &msg_buf[32], SHA256_HASH_SIZE);
+
+    // Do error checking
+    // Get block and send back
+    
+
+    Close(connfd); 
+    return 0;
 }
 
 void* server(void *arg) {
-    // open listening socket (rio)
-
-    //infinite loop
-
-    //complete action (rio)
-
-    //close connection (rio)
-
     // Descriptors
     int listenfd;
     int connfd;
@@ -623,8 +638,8 @@ void* server(void *arg) {
 
     while(1) {
         clientlen = sizeof(clientaddr);
-        printf("Waiting for connections...\n");
-        connfd = Accept(listenfd, &clientaddr, &clientlen); // Waits for connection to happen
+        printf("Awaiting new connection...\n");
+        connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen); // Waits for connection to happen
         
         // mayby not needed
         getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
@@ -652,6 +667,7 @@ void* server(void *arg) {
     return 0;
     
 }
+
 
 /*
  * The entry point for the code. Parses command line arguments and starts up the appropriate peer code.
