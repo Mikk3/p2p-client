@@ -593,6 +593,20 @@ int subscribe(hashdata_t hash)
     return 1;
 }
 
+void reporterror(int connfd, char code, char* msg) {
+    uint64_t msglen = strlen(msg);
+    uint64_t msglenNetwork = htobe64(msglen);
+
+    char buf[MAXLINE];
+
+    memcpy(buf, &code, 1);
+    memcpy(buf + 1, &msglenNetwork, 8);
+    memcpy(buf + 9, msg, msglen);
+
+    Rio_writen(connfd, buf, 9 + msglen);
+
+}
+
 void* handle(void *arg) {
     printf("handle called\n");
 
@@ -613,6 +627,9 @@ void* handle(void *arg) {
     memcpy(RequestedCascadeHash, &msg_buf[32], SHA256_HASH_SIZE);
 
     // Do error checking
+    reporterror(connfd, 4, "Testing error message");
+
+
     // Get block and send back
     
 
