@@ -25,6 +25,8 @@ struct csc_file *casc_file;
 csc_block_t** queue;
 struct csc_peer *peers;
 
+struct ActiveFiles* activeFiles;
+
 /*
  * Frees global resources that are malloc'ed during peer downloads.
  */
@@ -32,7 +34,7 @@ void free_resources()
 {
     free(queue);
     free(peers);
-    csc_free_file(casc_file);
+    //csc_free_file(casc_file);
 }
 
 /*
@@ -106,6 +108,21 @@ void download_only_peer(char* cascade_file)
 
     casc_file = csc_parse_file(cascade_file, output_file);
 
+    // Also used for get_peers_list
+    hashdata_t hash_buf;
+    get_file_sha(cascade_file, hash_buf, SHA256_HASH_SIZE);
+
+    // Add to activeFiles (TODO: Add Mutex)
+    memcpy(&activeFiles->csc_files[activeFiles->length].cascadeHash, &hash_buf, 32);
+    activeFiles->csc_files[activeFiles->length].csc_file = casc_file;
+    
+    activeFiles->csc_files[activeFiles->length].output_file = malloc(cutoff * sizeof(char));
+    memcpy(activeFiles->csc_files[activeFiles->length].output_file, output_file, cutoff);
+    activeFiles->length++;
+    
+    // Subscribe file to tracker ("Double duty")
+    subscribe(hash_buf);
+
     int uncomp_count = 0;
     queue = Malloc(casc_file->blockcount * sizeof(csc_block_t*));
 
@@ -126,9 +143,6 @@ void download_only_peer(char* cascade_file)
         return;
     }
     queue = Realloc(queue, uncomp_count * sizeof(csc_block_t*));
-
-    hashdata_t hash_buf;
-    get_file_sha(cascade_file, hash_buf, SHA256_HASH_SIZE);
 
     int peercount = 0;
     while (peercount == 0)
@@ -161,6 +175,7 @@ void download_only_peer(char* cascade_file)
     for (int i = 0; i < uncomp_count; i++)
     {
         get_block(queue[i], peer, hash_buf, output_file);
+        queue[i]->completed = 1;
     }
     printf("File downloaded successfully\n");
 
@@ -605,6 +620,8 @@ void reporterror(int connfd, char code, char* msg) {
 
     Rio_writen(connfd, buf, 9 + msglen);
 
+    Close(connfd); 
+
 }
 
 void* handle(void *arg) {
@@ -626,13 +643,66 @@ void* handle(void *arg) {
     RequestedBlock = be64toh(*((unsigned long long*)&msg_buf[24]));
     memcpy(RequestedCascadeHash, &msg_buf[32], SHA256_HASH_SIZE);
 
-    // Do error checking
-    reporterror(connfd, 4, "Testing error message");
+    int fileFound = 0;
+    csc_file_t* csc_file;
+    char* output_file;
+    
+    // Seach for file
+    for (int i = 0; i < activeFiles->length; i++) {
+        if (memcmp(activeFiles->csc_files[i].cascadeHash, RequestedCascadeHash, SHA256_HASH_SIZE) == 0) {
+            
+            fileFound = 1;
+            csc_file = activeFiles->csc_files[i].csc_file;
+            output_file = activeFiles->csc_files[i].output_file;
+        }
+    }
 
+    // Check if file is servered
+    if (fileFound == 0) {
+        reporterror(connfd, 1, "Requested hash is not servered");
+        return;
+    }
 
-    // Get block and send back
+    // Check if block number is too large
+    if (RequestedBlock >= csc_file->blockcount) {
+        reporterror(connfd, 3, "Requested block numbers was higher then file total block count");
+        return;
+    }
+
+    // check if requested block is present
+    if(csc_file->blocks[RequestedBlock].completed != 1) {
+        reporterror(connfd, 2, "Block number is not currently held by this peer");
+        return;
+    }
+
+    uint64_t body_length = csc_file->blocks[RequestedBlock].length;
+
+    char *block_data = Calloc(body_length, sizeof(char));
+    
+    FILE* fp = Fopen(output_file, "rb+");
+    if (fp == 0)
+    {
+        printf("Failed to open destination: %s\n", output_file);
+        free(block_data);
+        Close(connfd); 
+        return;
+    }
+    fseek(fp, csc_file->blocks[RequestedBlock].offset, SEEK_SET);
     
 
+    char* reply_buf = Calloc(1+8+body_length, sizeof(char));
+
+    uint64_t msglenNetwork = htobe64(body_length);
+
+    char status_code = 0;
+
+    memcpy(reply_buf, &status_code, 1);
+    memcpy(reply_buf + 1, &msglenNetwork, 8);
+    rio_readn(fileno(fp), reply_buf + 9, body_length);
+
+    rio_writen(connfd, reply_buf, 1+8+body_length);
+    
+    fclose(fp);
     Close(connfd); 
     return 0;
 }
@@ -650,7 +720,7 @@ void* server(void *arg) {
 
     listenfd = open_listenfd(my_port);
 
-    pthread_t *threads = calloc(300, sizeof(pthread_t));
+    pthread_t *threads = calloc(10000, sizeof(pthread_t));
     int indx = 0;
 
     while(1) {
@@ -668,12 +738,15 @@ void* server(void *arg) {
             err(1, "pthread_create() failed");
         }
         printf("Created Thread\n");
+        printf("%i\n", indx);
         indx++;
         
         
 
 
     }
+
+    printf("Done while\n");
 
     for (int i = 0; i < indx; i++) {
         if (pthread_join(threads[i], NULL) != 0) {
@@ -747,6 +820,9 @@ int main(int argc, char **argv)
         }
     }
 
+    activeFiles = malloc(sizeof(struct Activefiles*));
+    activeFiles->csc_files = calloc(casc_count, sizeof(struct ActiveFile*));
+
     // Create server thread
     pthread_t server_thread;
     if (pthread_create(&server_thread, NULL, &server, NULL) != 0) {
@@ -757,20 +833,16 @@ int main(int argc, char **argv)
     for (int j=0; j<casc_count; j++)
     {
 
-        hashdata_t hash_buf;
-        get_file_sha(cascade_files[j], hash_buf, SHA256_HASH_SIZE);
-
-        subscribe(hash_buf);
-
         printf("[ Getting file %i ]\n", j);
         download_only_peer(cascade_files[j]);
     }
-
     
     // Wait for server to stop
     if (pthread_join(server_thread, NULL) != 0) {
       err(1, "pthread_join() failed");
     }
+
+    // TODO: Free activefiles
 
     exit(EXIT_SUCCESS);
 }
