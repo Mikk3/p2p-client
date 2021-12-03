@@ -88,6 +88,11 @@ void get_file_sha(const char* sourcefile, hashdata_t hash, int size)
     get_data_sha(buffer, hash, casc_file_size, size);
 }
 
+
+/*
+ * Subscribe the given cascade hash to the network This is Identical to get_peers_list 
+ * besides the command sent to tracker is 2 and not 1.
+ */
 int subscribe(hashdata_t hash)
 {
     rio_t rio;
@@ -179,21 +184,24 @@ void download_only_peer(char* cascade_file)
 
     casc_file = csc_parse_file(cascade_file, output_file);
 
+    // Calculate cascade file hash
     // Also used for get_peers_list
     hashdata_t hash_buf;
     get_file_sha(cascade_file, hash_buf, SHA256_HASH_SIZE);
 
-    // Add to activeFiles
+    // Add to activeFiles, mutex ensures handle threads are not reading while we are updating.
     assert(pthread_mutex_lock(activeFiles->lock) == 0);
-    memcpy(&activeFiles->csc_files[activeFiles->length].cascadeHash, &hash_buf, 32);
-    activeFiles->csc_files[activeFiles->length].csc_file = casc_file;
+    memcpy(&activeFiles->csc_files[activeFiles->length].cascadeHash, &hash_buf, 32); // Cascade Hash
+    activeFiles->csc_files[activeFiles->length].csc_file = casc_file; // Pointer to casc file data struture
     
-    activeFiles->csc_files[activeFiles->length].output_file = malloc(cutoff * sizeof(char));
-    memcpy(activeFiles->csc_files[activeFiles->length].output_file, output_file, cutoff);
+    activeFiles->csc_files[activeFiles->length].output_file = malloc(cutoff * sizeof(char)); 
+    memcpy(activeFiles->csc_files[activeFiles->length].output_file, output_file, cutoff); // The data file name
     activeFiles->length++;
     assert(pthread_mutex_unlock(activeFiles->lock) == 0);
     
     // Subscribe file to tracker
+    // This is necessary as get_peers_list is not executed if its a complete file
+    // and therefore not enrolling us in the network.
     subscribe(hash_buf);
 
     int uncomp_count = 0;
@@ -617,6 +625,10 @@ int get_peers_list(hashdata_t hash)
     return peercount;
 }
 
+
+/*
+ * Writes the status code and msg to the given file descriptor
+ */
 void reporterror(int connfd, char code, char* msg) {
     uint64_t msglen = strlen(msg);
     uint64_t msglenNetwork = htobe64(msglen);
@@ -633,13 +645,17 @@ void reporterror(int connfd, char code, char* msg) {
 
 }
 
+/*
+ * Read request from a peer and write back the requested block
+ * or the appropriate error code and message
+ */
 void* handle(void *arg) {
     int connfd = *((int *) arg);
     assert(pthread_mutex_unlock(&ConnLock) == 0);
 
     rio_t rio;
     char msg_buf[MAXLINE];
-    
+
     Rio_readinitb(&rio, connfd);
 
     // Read request
@@ -699,17 +715,18 @@ void* handle(void *arg) {
     }
     fseek(fp, csc_file->blocks[RequestedBlock].offset, SEEK_SET);
     
-
+    // 1 = status_code, 8 = msg length
     char* reply_buf = Calloc(1+8+body_length, sizeof(char));
 
     uint64_t msglenNetwork = htobe64(body_length);
 
     char status_code = 0;
-
     memcpy(reply_buf, &status_code, 1);
     memcpy(reply_buf + 1, &msglenNetwork, 8);
+    // Read from file to reply buffer
     rio_readn(fileno(fp), reply_buf + 9, body_length);
 
+    // Write to socket.
     rio_writen(connfd, reply_buf, 1+8+body_length);
     
     fclose(fp);
@@ -718,10 +735,12 @@ void* handle(void *arg) {
     pthread_exit(NULL);
 }
 
+/*
+ * Accept incoming connections and create handle threads
+ * to process these requests.
+ */
 void* server() {
-    // Descriptors
     int listenfd;
-    // Client Address
     socklen_t clientlen;
     struct sockaddr clientaddr;
 
@@ -736,9 +755,7 @@ void* server() {
         int connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen); // Waits for connection to happen
 
         if (connfd == -1) {
-
             assert(pthread_mutex_unlock(&ConnLock) == 0);
-
         } else {
             // Create thread to handle block request
             if (pthread_create(&threads[indx], NULL, &handle, &connfd) != 0) {
@@ -746,12 +763,9 @@ void* server() {
                 assert(pthread_mutex_unlock(&ConnLock) == 0);
             }
             indx++;
-
         }
  
     }
-
-    printf("Done while\n");
 
     for (int i = 0; i < indx; i++) {
         if (pthread_join(threads[i], NULL) != 0) {
@@ -759,8 +773,7 @@ void* server() {
         }
     }
 
-    return 0;
-    
+    pthread_exit(NULL);
 }
 
 
@@ -831,7 +844,7 @@ int main(int argc, char **argv)
 
     activeFiles->csc_files = calloc(casc_count, sizeof(struct ActiveFile*));
 
-    // Create server thread
+    // Create our server
     pthread_t server_thread;
     if (pthread_create(&server_thread, NULL, &server, NULL) != 0) {
       err(1, "pthread_create() failed");
