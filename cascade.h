@@ -77,6 +77,25 @@ typedef struct csc_peer {
     uint8_t good;
 } csc_peer_t;
 
+
+
+// Custom
+typedef struct ActiveFiles
+{
+    struct ActiveFile* csc_files;
+    int length;
+} ActiveFiles_t;
+
+typedef struct ActiveFile
+{
+    hashdata_t cascadeHash;
+    csc_file_t* csc_file;
+    char* output_file;
+} ActiveFile_t;
+
+
+
+
 /*
  * Parses a hex-string and returns the bytes corresponding to the value
  */
