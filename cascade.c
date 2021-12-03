@@ -639,9 +639,7 @@ void* handle(void *arg) {
 
     rio_t rio;
     char msg_buf[MAXLINE];
-
-    sleep(5);
-
+    
     Rio_readinitb(&rio, connfd);
 
     // Read request
