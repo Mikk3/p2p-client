@@ -84,6 +84,7 @@ typedef struct ActiveFiles
 {
     struct ActiveFile* csc_files;
     int length;
+    pthread_mutex_t* lock;
 } ActiveFiles_t;
 
 typedef struct ActiveFile

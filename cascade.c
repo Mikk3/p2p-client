@@ -27,6 +27,10 @@ struct csc_peer *peers;
 
 struct ActiveFiles* activeFiles;
 
+pthread_mutex_t ConnLock = PTHREAD_MUTEX_INITIALIZER;
+
+
+
 /*
  * Frees global resources that are malloc'ed during peer downloads.
  */
@@ -34,7 +38,6 @@ void free_resources()
 {
     free(queue);
     free(peers);
-    //csc_free_file(casc_file);
 }
 
 /*
@@ -85,6 +88,74 @@ void get_file_sha(const char* sourcefile, hashdata_t hash, int size)
     get_data_sha(buffer, hash, casc_file_size, size);
 }
 
+int subscribe(hashdata_t hash)
+{
+    rio_t rio;
+    char msg_buf[MAXLINE];
+
+    int tracker_socket = Open_clientfd(tracker_ip, tracker_port);
+    Rio_readinitb(&rio, tracker_socket);
+
+    struct RequestHeader request_header;
+    // memcpy as it does not end with terminating null byte.
+    memcpy(request_header.protocol, "CASC", sizeof(request_header.protocol));
+
+    request_header.version = htonl(1);
+    request_header.command = htonl(2);
+    request_header.length = htonl(BODY_SIZE);
+
+    memcpy(msg_buf, &request_header, HEADER_SIZE);
+
+    struct in_addr byte_my_ip;
+    inet_aton(my_ip, &byte_my_ip);
+
+    struct RequestBody request_body;
+    memcpy(request_body.hash, hash, SHA256_HASH_SIZE);
+    request_body.ip = byte_my_ip;
+    request_body.port = htons(atoi(my_port));
+    memcpy(msg_buf + HEADER_SIZE, &request_body, BODY_SIZE);
+
+    Rio_writen(tracker_socket, msg_buf, MESSAGE_SIZE);
+
+    Rio_readnb(&rio, msg_buf, MAXLINE);
+
+    char reply_header[REPLY_HEADER_SIZE];
+    memcpy(reply_header, msg_buf, REPLY_HEADER_SIZE);
+
+    uint32_t msglen = ntohl(*(uint32_t*)&reply_header[1]);
+    if (msglen == 0)
+    {
+        return 0;
+    }
+
+    if (reply_header[0] != 0)
+    {
+        char* error_buf = Malloc(msglen + 1);
+        if (error_buf == NULL)
+        {
+            printf("Tracker error %d and out-of-memory reading error\n", reply_header[0]);
+            Close(tracker_socket);
+            return 0;
+        }
+        memset(error_buf, 0, msglen + 1);
+        memcpy(reply_header, error_buf, msglen);
+        printf("Tracker gave error: %d - %s\n", reply_header[0], error_buf);
+        Free(error_buf);
+        Close(tracker_socket);
+        return 0;
+    }
+
+    if (msglen % 12 != 0)
+    {
+        printf("LIST response from tracker was length %ud but should be evenly divisible by 12\n", msglen);
+        Close(tracker_socket);
+        return 0;
+    }
+    
+    Close(tracker_socket);
+    return 1;
+}
+
 /*
  * Perform all client based interactions in the P2P network for a given cascade file.
  * E.g. parse a cascade file and get all the relevent data from somewhere else on the
@@ -112,15 +183,17 @@ void download_only_peer(char* cascade_file)
     hashdata_t hash_buf;
     get_file_sha(cascade_file, hash_buf, SHA256_HASH_SIZE);
 
-    // Add to activeFiles (TODO: Add Mutex)
+    // Add to activeFiles
+    assert(pthread_mutex_lock(activeFiles->lock) == 0);
     memcpy(&activeFiles->csc_files[activeFiles->length].cascadeHash, &hash_buf, 32);
     activeFiles->csc_files[activeFiles->length].csc_file = casc_file;
     
     activeFiles->csc_files[activeFiles->length].output_file = malloc(cutoff * sizeof(char));
     memcpy(activeFiles->csc_files[activeFiles->length].output_file, output_file, cutoff);
     activeFiles->length++;
+    assert(pthread_mutex_unlock(activeFiles->lock) == 0);
     
-    // Subscribe file to tracker ("Double duty")
+    // Subscribe file to tracker
     subscribe(hash_buf);
 
     int uncomp_count = 0;
@@ -329,7 +402,11 @@ void get_block(csc_block_t* block, csc_peer_t peer, hashdata_t hash, char* outpu
     rio_t rio;
     char msg_buf[MAXLINE];
 
-    int peer_socket = Open_clientfd(peer.ip, peer.port);
+    int peer_socket = open_clientfd(peer.ip, peer.port);
+    if(peer_socket != 0) {
+        printf("Could not etablish connection to peer reported by tracker\n");
+        return;
+    }
     Rio_readinitb(&rio, peer_socket);
 
     struct ClientRequest client_request;
@@ -352,19 +429,19 @@ void get_block(csc_block_t* block, csc_peer_t peer, hashdata_t hash, char* outpu
     {
         if (reply_header[0] == 1)
         {
-            printf("Invalid hash. File not present on peer\n");
+            printf("Peer reported: Invalid hash, File not present on peer\n");
         }
         else if (reply_header[0] == 2)
         {
-            printf("Invalid hash. Block not present on peer\n");
+            printf("Peer reported: Invalid hash, Block not present on peer\n");
         }
         else if (reply_header[0] == 3)
         {
-            printf("Invalid block number\n");
+            printf("Peer reported: Invalid block number\n");
         }
         else if (reply_header[0] == 4)
         {
-            printf("Request could not be parsed\n");
+            printf("Peer reported: Request could not be parsed\n");
         }
         else
         {
@@ -540,74 +617,6 @@ int get_peers_list(hashdata_t hash)
     return peercount;
 }
 
-int subscribe(hashdata_t hash)
-{
-    rio_t rio;
-    char msg_buf[MAXLINE];
-
-    int tracker_socket = Open_clientfd(tracker_ip, tracker_port);
-    Rio_readinitb(&rio, tracker_socket);
-
-    struct RequestHeader request_header;
-    // memcpy as it does not end with terminating null byte.
-    memcpy(request_header.protocol, "CASC", sizeof(request_header.protocol));
-
-    request_header.version = htonl(1);
-    request_header.command = htonl(2);
-    request_header.length = htonl(BODY_SIZE);
-
-    memcpy(msg_buf, &request_header, HEADER_SIZE);
-
-    struct in_addr byte_my_ip;
-    inet_aton(my_ip, &byte_my_ip);
-
-    struct RequestBody request_body;
-    memcpy(request_body.hash, hash, SHA256_HASH_SIZE);
-    request_body.ip = byte_my_ip;
-    request_body.port = htons(atoi(my_port));
-    memcpy(msg_buf + HEADER_SIZE, &request_body, BODY_SIZE);
-
-    Rio_writen(tracker_socket, msg_buf, MESSAGE_SIZE);
-
-    Rio_readnb(&rio, msg_buf, MAXLINE);
-
-    char reply_header[REPLY_HEADER_SIZE];
-    memcpy(reply_header, msg_buf, REPLY_HEADER_SIZE);
-
-    uint32_t msglen = ntohl(*(uint32_t*)&reply_header[1]);
-    if (msglen == 0)
-    {
-        return 0;
-    }
-
-    if (reply_header[0] != 0)
-    {
-        char* error_buf = Malloc(msglen + 1);
-        if (error_buf == NULL)
-        {
-            printf("Tracker error %d and out-of-memory reading error\n", reply_header[0]);
-            Close(tracker_socket);
-            return 0;
-        }
-        memset(error_buf, 0, msglen + 1);
-        memcpy(reply_header, error_buf, msglen);
-        printf("Tracker gave error: %d - %s\n", reply_header[0], error_buf);
-        Free(error_buf);
-        Close(tracker_socket);
-        return 0;
-    }
-
-    if (msglen % 12 != 0)
-    {
-        printf("LIST response from tracker was length %ud but should be evenly divisible by 12\n", msglen);
-        Close(tracker_socket);
-        return 0;
-    }
-    
-    Close(tracker_socket);
-    return 1;
-}
-
 void reporterror(int connfd, char code, char* msg) {
     uint64_t msglen = strlen(msg);
     uint64_t msglenNetwork = htobe64(msglen);
@@ -625,12 +634,13 @@ void reporterror(int connfd, char code, char* msg) {
 }
 
 void* handle(void *arg) {
-    printf("handle called\n");
+    int connfd = *((int *) arg);
+    assert(pthread_mutex_unlock(&ConnLock) == 0);
 
     rio_t rio;
     char msg_buf[MAXLINE];
 
-    int connfd = *(int*)arg;
+    sleep(5);
 
     Rio_readinitb(&rio, connfd);
 
@@ -647,7 +657,8 @@ void* handle(void *arg) {
     csc_file_t* csc_file;
     char* output_file;
     
-    // Seach for file
+    // Search for file
+    assert(pthread_mutex_lock(activeFiles->lock) == 0);
     for (int i = 0; i < activeFiles->length; i++) {
         if (memcmp(activeFiles->csc_files[i].cascadeHash, RequestedCascadeHash, SHA256_HASH_SIZE) == 0) {
             
@@ -656,23 +667,24 @@ void* handle(void *arg) {
             output_file = activeFiles->csc_files[i].output_file;
         }
     }
+    assert(pthread_mutex_unlock(activeFiles->lock) == 0);
 
     // Check if file is servered
     if (fileFound == 0) {
         reporterror(connfd, 1, "Requested hash is not servered");
-        return;
+        pthread_exit(NULL);
     }
 
     // Check if block number is too large
     if (RequestedBlock >= csc_file->blockcount) {
         reporterror(connfd, 3, "Requested block numbers was higher then file total block count");
-        return;
+        pthread_exit(NULL);
     }
 
     // check if requested block is present
     if(csc_file->blocks[RequestedBlock].completed != 1) {
         reporterror(connfd, 2, "Block number is not currently held by this peer");
-        return;
+        pthread_exit(NULL);
     }
 
     uint64_t body_length = csc_file->blocks[RequestedBlock].length;
@@ -685,7 +697,7 @@ void* handle(void *arg) {
         printf("Failed to open destination: %s\n", output_file);
         free(block_data);
         Close(connfd); 
-        return;
+        pthread_exit(NULL); 
     }
     fseek(fp, csc_file->blocks[RequestedBlock].offset, SEEK_SET);
     
@@ -704,46 +716,41 @@ void* handle(void *arg) {
     
     fclose(fp);
     Close(connfd); 
-    return 0;
+    
+    pthread_exit(NULL);
 }
 
-void* server(void *arg) {
+void* server() {
     // Descriptors
     int listenfd;
-    int connfd;
-    // Client Info
-    char hostname[MAXLINE];
-    char port[MAXLINE];
     // Client Address
     socklen_t clientlen;
     struct sockaddr clientaddr;
 
     listenfd = open_listenfd(my_port);
 
-    pthread_t *threads = calloc(10000, sizeof(pthread_t));
+    pthread_t *threads = calloc(30000, sizeof(pthread_t));
     int indx = 0;
 
     while(1) {
+        assert(pthread_mutex_lock(&ConnLock) == 0);
         clientlen = sizeof(clientaddr);
-        printf("Awaiting new connection...\n");
-        connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen); // Waits for connection to happen
-        
-        // mayby not needed
-        getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        int connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen); // Waits for connection to happen
 
-        
-        // threads
-        if (pthread_create(&threads[indx], NULL, &handle, &connfd) != 0) {
-            err(1, "pthread_create() failed");
+        if (connfd == -1) {
+
+            assert(pthread_mutex_unlock(&ConnLock) == 0);
+
+        } else {
+            // Create thread to handle block request
+            if (pthread_create(&threads[indx], NULL, &handle, &connfd) != 0) {
+                err(1, "pthread_create() failed");
+                assert(pthread_mutex_unlock(&ConnLock) == 0);
+            }
+            indx++;
+
         }
-        printf("Created Thread\n");
-        printf("%i\n", indx);
-        indx++;
-        
-        
-
-
+ 
     }
 
     printf("Done while\n");
@@ -821,6 +828,9 @@ int main(int argc, char **argv)
     }
 
     activeFiles = malloc(sizeof(struct Activefiles*));
+    activeFiles->lock = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(activeFiles->lock, NULL);
+
     activeFiles->csc_files = calloc(casc_count, sizeof(struct ActiveFile*));
 
     // Create server thread
@@ -832,7 +842,6 @@ int main(int argc, char **argv)
     // Download files
     for (int j=0; j<casc_count; j++)
     {
-
         printf("[ Getting file %i ]\n", j);
         download_only_peer(cascade_files[j]);
     }
@@ -842,7 +851,16 @@ int main(int argc, char **argv)
       err(1, "pthread_join() failed");
     }
 
-    // TODO: Free activefiles
+    // Free activefiles
+    for (int i = 0; i < casc_count; i++)
+    {
+        csc_free_file(activeFiles->csc_files[i].csc_file);
+    }
+    free(activeFiles->csc_files);
+    activeFiles->csc_files = NULL;
+    free(activeFiles->lock);
+    activeFiles->lock = NULL;
+    free(activeFiles); 
 
     exit(EXIT_SUCCESS);
 }
