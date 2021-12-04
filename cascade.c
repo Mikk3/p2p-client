@@ -653,6 +653,8 @@ void* handle(void *arg) {
     int connfd = *((int *) arg);
     assert(pthread_mutex_unlock(&ConnLock) == 0);
 
+    Pthread_detach(pthread_self());
+
     rio_t rio;
     char msg_buf[MAXLINE];
 
@@ -743,11 +745,9 @@ void* server() {
     int listenfd;
     socklen_t clientlen;
     struct sockaddr clientaddr;
+    pthread_t tid;
 
     listenfd = open_listenfd(my_port);
-
-    pthread_t *threads = calloc(30000, sizeof(pthread_t));
-    int indx = 0;
 
     while(1) {
         assert(pthread_mutex_lock(&ConnLock) == 0);
@@ -758,19 +758,12 @@ void* server() {
             assert(pthread_mutex_unlock(&ConnLock) == 0);
         } else {
             // Create thread to handle block request
-            if (pthread_create(&threads[indx], NULL, &handle, &connfd) != 0) {
+            if (pthread_create(&tid, NULL, &handle, &connfd) != 0) {
                 err(1, "pthread_create() failed");
                 assert(pthread_mutex_unlock(&ConnLock) == 0);
             }
-            indx++;
         }
  
-    }
-
-    for (int i = 0; i < indx; i++) {
-        if (pthread_join(threads[i], NULL) != 0) {
-            err(1, "pthread_join() failed");
-        }
     }
 
     pthread_exit(NULL);
