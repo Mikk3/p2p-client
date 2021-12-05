@@ -411,7 +411,7 @@ void get_block(csc_block_t* block, csc_peer_t peer, hashdata_t hash, char* outpu
     char msg_buf[MAXLINE];
 
     int peer_socket = open_clientfd(peer.ip, peer.port);
-    if(peer_socket != 0) {
+    if(peer_socket == -1) {
         printf("Could not etablish connection to peer reported by tracker\n");
         return;
     }
